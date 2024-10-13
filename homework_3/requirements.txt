@@ -1,0 +1,9 @@
+matplotlib
+numpy
+tensorflow
+tensorflow-metal
+scikit-learn
+yfinance
+pandas
+ipykernel
+seaborn
