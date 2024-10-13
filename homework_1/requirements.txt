@@ -1,5 +1,0 @@
-matplotlib
-numpy
-tensorflow
-tensorflow-metal
-scikit-learn
