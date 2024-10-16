@@ -1,8 +1,28 @@
 from abc import ABC, abstractmethod
 from tensorflow import keras as keras
-import tensorflow as tf
 import numpy as np
+from sklearn.metrics import mean_absolute_error
 import matplotlib.pyplot as plt
+from models import TimeSeriesModel
+from typing import Callable
+
+
+def create_dataset(
+    timeseries: np.ndarray, T: int, m: int, indices: list[int]
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    # Split the given timeseries (shape (N, n_features)) into input sequence of length T, target sequence of length m
+    # and decoder input sequence of length m (target sequence shifted back by one time step).
+    # Sequences are made according to the given indices.
+    # Returns the input sequence, target sequence and decoder input sequnce
+
+    X = np.array([timeseries[i : i + T] for i in indices])
+    X, y, decoder_input = (
+        X[:, : T - m, :].copy(),
+        X[:, -m:, :].copy(),
+        X[:, -m - 1 : -1, :].copy(),
+    )
+
+    return X, y, decoder_input
 
 
 # Abstract class for typing util functions
@@ -38,7 +58,7 @@ class CustomModel(ABC):
 
 
 def plot_training_metrics(
-    model: CustomModel,
+    model: keras.Model,
     metric: str,
     metric_name: str,
     loss_name: str,
@@ -52,12 +72,12 @@ def plot_training_metrics(
     plt.subplot(1, 2, 1)
     plt.plot(
         range(1, n_epochs),
-        model.model.history.history["loss"][1:],
+        model.history.history["loss"][1:],
         label="Entrenamiento",
     )
     plt.plot(
         range(1, n_epochs),
-        model.model.history.history["val_loss"][1:],
+        model.history.history["val_loss"][1:],
         label="Validación",
     )
     plt.title("Función de pérdida")
@@ -65,8 +85,8 @@ def plot_training_metrics(
     plt.ylabel(loss_name)
 
     plt.subplot(1, 2, 2)
-    plt.plot(model.model.history.history[metric], label="Entrenamiento")
-    plt.plot(model.model.history.history[f"val_{metric}"], label="Validación")
+    plt.plot(model.history.history[metric], label="Entrenamiento")
+    plt.plot(model.history.history[f"val_{metric}"], label="Validación")
     plt.title(metric_name)
     plt.xlabel("Época")
     plt.ylabel(metric)
@@ -76,7 +96,7 @@ def plot_training_metrics(
 
 
 def train_model_and_plot(
-    model: CustomModel,
+    model: keras.Model,
     epochs: int,
     adam_optimizer_params: dict,
     X: np.ndarray,
@@ -95,12 +115,9 @@ def train_model_and_plot(
     )
 
     model.fit(
-        X,
-        decoder_input,
+        [X, decoder_input],
         y,
-        X_val,
-        decoder_input_val,
-        y_val,
+        validation_data=([X_val, decoder_input_val], y_val),
         batch_size=64,
         epochs=epochs,
     )
@@ -114,59 +131,38 @@ def train_model_and_plot(
     )
 
 
-class LocalNormalization:
-    def __init__(self, sequences: np.ndarray):
-        # compute vector of means and standard deviations, for each sequence
+def predictions_analysis(
+    model: TimeSeriesModel,
+    X_test: np.ndarray,
+    y_test: np.ndarray,
+    y_test_raw: np.ndarray,
+    features_name: list[str],
+    back2rawdata: Callable[[np.ndarray], np.ndarray],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    # Function to predict from given data and given TimeSeriesModel, and compute mean absolute error from in preprocessed data scale and real scale
 
-        self.means = sequences.mean(
-            axis=1
-        )  # vector mu of means for each sequence, i.e., mu[i] is the vector of means for each feature of sequence i
-        self.stds = sequences.std(
-            axis=1
-        )  # vector of standard deviations for each sequence
+    data_dim = X_test.shape[-1]
 
-    def transform(self, sequences: np.ndarray) -> np.ndarray:
-        sequences_norm = np.zeros(sequences.shape)
+    pred = model.predict(X_test)  # predictions
+    pred_flat = pred.reshape(-1, data_dim)
+    y_test_flat = y_test.reshape(-1, data_dim)  # ground truth
 
-        for i in range(sequences.shape[0]):
-            sequences_norm[i] = (sequences[i] - self.means[i]) / self.stds[i]
+    mae = mean_absolute_error(y_test_flat, pred_flat, multioutput="raw_values")
 
-        return sequences_norm
+    print("\nErrores absolutos medios en la escala normalizada:")
+    for i, feature in enumerate(features_name):
+        print(feature, ":", mae[i])
 
-    def inverse_transform(self, sequences_norm: np.ndarray) -> np.ndarray:
-        sequences_raw = np.zeros(sequences_norm.shape)
+    pred_raw = back2rawdata(pred)  # predicted prices
+    pred_raw_flat = pred_raw.reshape(-1, data_dim)
+    y_test_raw_flat = y_test_raw.reshape(-1, data_dim)
 
-        for i in range(sequences_norm.shape[0]):
-            sequences_raw[i] = self.stds[i] * sequences_norm[i] + self.means[i]
+    mae_raw = mean_absolute_error(
+        y_test_raw_flat, pred_raw_flat, multioutput="raw_values"
+    )
 
-        return sequences_raw
+    print("\nErrores absolutos medios en la escala de los precios:")
+    for i, feature in enumerate(features_name):
+        print(feature, ":", mae_raw[i])
 
-
-class LocalMinMaxScaling:
-    def __init__(self, sequences: np.ndarray):
-        # compute vector of minimums and maximums, for each sequence
-
-        self.min = sequences.min(
-            axis=1
-        )  # vector of minimums for each sequence, i.e.,  min[i] is the vector of minimums of each feature in sequence i
-        self.max = sequences.max(axis=1)  # vector of maximums for each sequence
-
-    def transform(self, sequences: np.ndarray) -> np.ndarray:
-        sequences_scaled = np.zeros(sequences.shape)
-
-        for i in range(sequences.shape[0]):
-            sequences_scaled[i] = (sequences[i] - self.min[i]) / (
-                self.max[i] - self.min[i]
-            )
-
-        return sequences_scaled
-
-    def inverse_transform(self, sequences_scaled: np.ndarray) -> np.ndarray:
-        sequences_raw = np.zeros(sequences_scaled.shape)
-
-        for i in range(sequences_scaled.shape[0]):
-            sequences_raw[i] = (self.max[i] - self.min[i]) * sequences_scaled[
-                i
-            ] + self.min[i]
-
-        return sequences_raw
+    return pred, pred_raw, mae, mae_raw
