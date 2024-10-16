@@ -76,12 +76,12 @@ def plot_training_metrics(
     plt.subplot(1, 2, 1)
     plt.plot(
         range(start_loss, n_epochs),
-        model.history.history["loss"][1:],
+        model.history.history["loss"][start_loss:],
         label="Entrenamiento",
     )
     plt.plot(
         range(start_loss, n_epochs),
-        model.history.history["val_loss"][1:],
+        model.history.history["val_loss"][start_loss:],
         label="Validación",
     )
     plt.title("Función de pérdida")
