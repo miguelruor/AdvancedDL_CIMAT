@@ -1,8 +1,29 @@
 from abc import ABC, abstractmethod
 from tensorflow import keras as keras
-import tensorflow as tf
+import pandas as pd
 import numpy as np
+from sklearn.metrics import mean_absolute_error
 import matplotlib.pyplot as plt
+from models import TimeSeriesModel
+from typing import Callable
+
+
+def create_dataset(
+    timeseries: np.ndarray, T: int, m: int, indices: list[int]
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    # Split the given timeseries (shape (N, n_features)) into input sequence of length T, target sequence of length m
+    # and decoder input sequence of length m (target sequence shifted back by one time step).
+    # Sequences are made according to the given indices.
+    # Returns the input sequence, target sequence and decoder input sequnce
+
+    X = np.array([timeseries[i : i + T] for i in indices])
+    X, y, decoder_input = (
+        X[:, : T - m, :].copy(),
+        X[:, -m:, :].copy(),
+        X[:, -m - 1 : -1, :].copy(),
+    )
+
+    return X, y, decoder_input
 
 
 # Abstract class for typing util functions
@@ -38,26 +59,29 @@ class CustomModel(ABC):
 
 
 def plot_training_metrics(
-    model: CustomModel,
+    model: keras.Model,
     metric: str,
     metric_name: str,
     loss_name: str,
     n_epochs: int,
     figsize: tuple[int, int] = (14, 5),
+    plot_all_loss: bool = False,
 ):
     # function to plot loss function and metric function when training the given CustomModel
+
+    start_loss = 0 if plot_all_loss else 1
 
     plt.figure(figsize=figsize)
 
     plt.subplot(1, 2, 1)
     plt.plot(
-        range(1, n_epochs),
-        model.model.history.history["loss"][1:],
+        range(start_loss, n_epochs),
+        model.history.history["loss"][start_loss:],
         label="Entrenamiento",
     )
     plt.plot(
-        range(1, n_epochs),
-        model.model.history.history["val_loss"][1:],
+        range(start_loss, n_epochs),
+        model.history.history["val_loss"][start_loss:],
         label="Validación",
     )
     plt.title("Función de pérdida")
@@ -65,8 +89,8 @@ def plot_training_metrics(
     plt.ylabel(loss_name)
 
     plt.subplot(1, 2, 2)
-    plt.plot(model.model.history.history[metric], label="Entrenamiento")
-    plt.plot(model.model.history.history[f"val_{metric}"], label="Validación")
+    plt.plot(model.history.history[metric], label="Entrenamiento")
+    plt.plot(model.history.history[f"val_{metric}"], label="Validación")
     plt.title(metric_name)
     plt.xlabel("Época")
     plt.ylabel(metric)
@@ -76,7 +100,7 @@ def plot_training_metrics(
 
 
 def train_model_and_plot(
-    model: CustomModel,
+    model: keras.Model,
     epochs: int,
     adam_optimizer_params: dict,
     X: np.ndarray,
@@ -85,6 +109,7 @@ def train_model_and_plot(
     X_val: np.ndarray,
     decoder_input_val: np.ndarray,
     y_val: np.ndarray,
+    plot_all_loss: bool = False,
 ):
     # function to train given CustomModel and plot loss function and metric function
 
@@ -95,12 +120,9 @@ def train_model_and_plot(
     )
 
     model.fit(
-        X,
-        decoder_input,
+        [X, decoder_input],
         y,
-        X_val,
-        decoder_input_val,
-        y_val,
+        validation_data=([X_val, decoder_input_val], y_val),
         batch_size=64,
         epochs=epochs,
     )
@@ -111,62 +133,169 @@ def train_model_and_plot(
         metric_name="Error absoluto medio",
         loss_name="Error cuadrático medio",
         n_epochs=epochs,
+        plot_all_loss=plot_all_loss,
     )
 
 
-class LocalNormalization:
-    def __init__(self, sequences: np.ndarray):
-        # compute vector of means and standard deviations, for each sequence
+def predictions_analysis(
+    model: TimeSeriesModel,
+    X_test: np.ndarray,
+    y_test: np.ndarray,
+    y_test_raw: np.ndarray,
+    features_name: list[str],
+    back2rawdata: Callable[[np.ndarray], np.ndarray],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    # Function to predict from given data and given TimeSeriesModel, and compute mean absolute error from in preprocessed data scale and real scale
 
-        self.means = sequences.mean(
-            axis=1
-        )  # vector mu of means for each sequence, i.e., mu[i] is the vector of means for each feature of sequence i
-        self.stds = sequences.std(
-            axis=1
-        )  # vector of standard deviations for each sequence
+    data_dim = X_test.shape[-1]
 
-    def transform(self, sequences: np.ndarray) -> np.ndarray:
-        sequences_norm = np.zeros(sequences.shape)
+    pred = model.predict(X_test)  # predictions
+    pred_flat = pred.reshape(-1, data_dim)
+    y_test_flat = y_test.reshape(-1, data_dim)  # ground truth
 
-        for i in range(sequences.shape[0]):
-            sequences_norm[i] = (sequences[i] - self.means[i]) / self.stds[i]
+    mae = mean_absolute_error(y_test_flat, pred_flat, multioutput="raw_values")
 
-        return sequences_norm
+    print("\nErrores absolutos medios en la escala normalizada:")
+    for i, feature in enumerate(features_name):
+        print(feature, ":", mae[i])
 
-    def inverse_transform(self, sequences_norm: np.ndarray) -> np.ndarray:
-        sequences_raw = np.zeros(sequences_norm.shape)
+    pred_raw = back2rawdata(pred)  # predicted prices
+    pred_raw_flat = pred_raw.reshape(-1, data_dim)
+    y_test_raw_flat = y_test_raw.reshape(-1, data_dim)
 
-        for i in range(sequences_norm.shape[0]):
-            sequences_raw[i] = self.stds[i] * sequences_norm[i] + self.means[i]
+    mae_raw = mean_absolute_error(
+        y_test_raw_flat, pred_raw_flat, multioutput="raw_values"
+    )
 
-        return sequences_raw
+    print("\nErrores absolutos medios en la escala de los precios:")
+    for i, feature in enumerate(features_name):
+        print(feature, ":", mae_raw[i])
+
+    return pred, pred_raw, mae, mae_raw
 
 
-class LocalMinMaxScaling:
-    def __init__(self, sequences: np.ndarray):
-        # compute vector of minimums and maximums, for each sequence
+def plot_predictions(
+    predictions: np.ndarray,
+    dataset_df: pd.DataFrame,
+    rand_ind: np.ndarray,
+    rand_times: list[pd.Timestamp],
+    T: int,
+    m: int,
+    window_size: int = 40,
+):
+    # function to plot predictions in random times (rand_times) and for each financial asset.
+    # rand_ind are the indices that correspond to rand_times in the predictions array
+    # columns in plot correspond to the selected times, and rows correspond to financial assets.
 
-        self.min = sequences.min(
-            axis=1
-        )  # vector of minimums for each sequence, i.e.,  min[i] is the vector of minimums of each feature in sequence i
-        self.max = sequences.max(axis=1)  # vector of maximums for each sequence
+    assets = dataset_df.columns
 
-    def transform(self, sequences: np.ndarray) -> np.ndarray:
-        sequences_scaled = np.zeros(sequences.shape)
+    n_rows, n_cols = 7, len(rand_ind)
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(30, 45))
 
-        for i in range(sequences.shape[0]):
-            sequences_scaled[i] = (sequences[i] - self.min[i]) / (
-                self.max[i] - self.min[i]
+    fig.suptitle("Predicciones de precios", fontsize=22)
+
+    # Iterate over each subplot (i, j) to plot prices of i-th financial asset and visually evaluate performance of prediction j
+    for j in range(n_cols):
+        jth_time = rand_times[
+            j
+        ]  # time t corresponding to sequence (x_t, x_{t+1}, ..., x_{t+\tau-1})
+        jth_data = dataset_df.loc[
+            jth_time
+            + pd.Timedelta(hours=T - window_size) : jth_time
+            + pd.Timedelta(hours=T - 1)
+        ]  # from the window of size T starting at t, just consider the last window_size points
+
+        pred_times = jth_data.index[-m:]  # predicted times
+        last_time = jth_data.index[-m - 1]  # last time t+\tau -1
+
+        for i in range(n_rows):
+            ith_asset = assets[i]
+            last_price = dataset_df.loc[last_time][ith_asset]
+
+            axes[i, j].plot(jth_data[ith_asset], label="Precios")
+            axes[i, j].plot(
+                [last_time] + [t for t in pred_times],
+                [last_price] + [pt for pt in predictions[rand_ind[j], :, i]],
+                color="r",
+                alpha=0.3,
             )
+            axes[i, j].axvline(
+                last_time,
+                color="orange",
+                linestyle="--",
+                label="Último tiempo antes de la predicción",
+            )
+            axes[i, j].scatter(
+                [last_time] + [t for t in pred_times],
+                [last_price] * (m + 1),
+                color="b",
+                label="Baseline",
+            )
+            axes[i, j].scatter(
+                pred_times,
+                predictions[rand_ind[j], :, i],
+                color="r",
+                label="Predicciones",
+            )
+            axes[i, j].set_title(
+                f"{ith_asset}\nÚltimo tiempo antes de la predicción: {last_time}",
+                fontsize=12,
+            )
+            axes[i, j].xaxis.set_major_locator(plt.MaxNLocator(7))
+            axes[i, j].tick_params(axis="x", labelrotation=45)
+            axes[i, j].legend(fontsize=12)
 
-        return sequences_scaled
+    plt.tight_layout(rect=[0, 0, 1, 0.98])
+    plt.show()
 
-    def inverse_transform(self, sequences_scaled: np.ndarray) -> np.ndarray:
-        sequences_raw = np.zeros(sequences_scaled.shape)
 
-        for i in range(sequences_scaled.shape[0]):
-            sequences_raw[i] = (self.max[i] - self.min[i]) * sequences_scaled[
-                i
-            ] + self.min[i]
+def predictions_analysis(
+    model: TimeSeriesModel,
+    X_test: np.ndarray,
+    y_test: np.ndarray,
+    y_test_raw: np.ndarray,
+    back2rawdata: Callable[[np.ndarray], np.ndarray],
+    dataset_df: pd.DataFrame,
+    T: int,
+    m: int,
+    rand_ind: np.ndarray,
+    rand_times: list[pd.Timestamp],
+    window_size: int = 40,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    # Function to predict from given data and given TimeSeriesModel, and compute mean absolute error from in preprocessed data scale and real scale
+    assets = dataset_df.columns
+    data_dim = X_test.shape[-1]
 
-        return sequences_raw
+    pred = model.predict(X_test)  # predictions
+    pred_flat = pred.reshape(-1, data_dim)
+    y_test_flat = y_test.reshape(-1, data_dim)  # ground truth
+
+    mae = mean_absolute_error(y_test_flat, pred_flat, multioutput="raw_values")
+
+    print("\nErrores absolutos medios en la escala normalizada:")
+    for i, asset in enumerate(assets):
+        print(asset, ":", mae[i])
+
+    pred_raw = back2rawdata(pred)  # predicted prices
+    pred_raw_flat = pred_raw.reshape(-1, data_dim)
+    y_test_raw_flat = y_test_raw.reshape(-1, data_dim)
+
+    mae_raw = mean_absolute_error(
+        y_test_raw_flat, pred_raw_flat, multioutput="raw_values"
+    )
+
+    print("\nErrores absolutos medios en la escala de los precios:")
+    for i, asset in enumerate(assets):
+        print(asset, ":", mae_raw[i])
+
+    plot_predictions(
+        predictions=pred_raw,
+        dataset_df=dataset_df,
+        rand_ind=rand_ind,
+        rand_times=rand_times,
+        T=T,
+        m=m,
+        window_size=window_size,
+    )
+
+    return pred, pred_raw, mae, mae_raw
