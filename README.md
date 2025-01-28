@@ -6,3 +6,4 @@ This repository contains the homework assignments (in Spanish) for the Advanced 
 - **Homework 2**: Seq2Seq and Seq2Seq with Attention for predicting cryptocurrencies time series
 - **Homework 3**: Transformer-Encoder-based model for predicting cryptocurrencies time series
 - **Homework 4**: LORA (Low-Rank Adaptation) strategy to fine-tune a Transformer-Encoder-based model for predicting cryptocurrencies time series, and adapt it for currencies time series.
+- **Homework 5**: Denoising Diffusion Implicit Model based on Transformer, using Oxford Flowers 102 dataset. 
